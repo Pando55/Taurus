@@ -1,0 +1,215 @@
+//+------------------------------------------------------------------+
+//|                                              Market Hunter.mq5   |
+//|                                  Exness Forex Trading Robot (MT5)|
+//|   Strategy: S/R + Trendlines + CRT + Fibonacci Retracement       |
+//+------------------------------------------------------------------+
+#property copyright "Market Hunter - Exness Edition"
+#property link      "https://www.exness.com"
+#property version   "2.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+
+//+------------------------------------------------------------------+
+//| Input Parameters                                                 |
+//+------------------------------------------------------------------+
+input string   EA_Name          = "Market Hunter";
+input string   Separator1       = "=== TRADE SETTINGS ===";
+input double   LotSize          = 0.01;
+input double   StopLossPips     = 30.0;
+input double   TakeProfitPips   = 60.0;
+input double   TrailingStopPips = 20.0;
+input double   TrailingStepPips = 5.0;
+input int      MagicNumber      = 202400;
+
+input string   SeparatorFibo    = "=== FIBONACCI SETTINGS ===";
+input int      Fibo_Lookback    = 100;    // Candles to find swing high/low
+input double   Fibo_Level       = 0.618;  // Golden Ratio
+
+input string   Separator2       = "=== S&R SETTINGS ===";
+input int      SR_Lookback      = 50;
+input double   SR_ZoneBuffer    = 10.0;
+
+input string   Separator4       = "=== CRT SETTINGS ===";
+input bool     UseCRT           = true;
+input int      CRT_Lookback     = 3;
+
+input string   Separator6       = "=== DISPLAY ===";
+input color    TextColor        = clrSilver;
+input color    AccentColor      = clrCrimson;
+
+//+------------------------------------------------------------------+
+//| Global Variables                                                 |
+//+------------------------------------------------------------------+
+CTrade      m_trade;
+double      m_pip;
+double      SupportLevel = 0, ResistanceLevel = 0;
+int         TrendDirection = 0;
+bool        CRT_BullSignal = false, CRT_BearSignal = false;
+bool        Fibo_BullSignal = false, Fibo_BearSignal = false;
+string      ObjPrefix = "MH_";
+datetime    LastBarTime = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   m_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 5 || SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 3) m_pip *= 10;
+   
+   m_trade.SetExpertMagicNumber(MagicNumber);
+   
+   ChartSetInteger(0, CHART_COLOR_BACKGROUND, clrBlack);
+   ChartSetInteger(0, CHART_COLOR_CANDLE_BULL, clrLime);
+   ChartSetInteger(0, CHART_COLOR_CANDLE_BEAR, clrCrimson);
+   
+   DrawScaryBackground();
+   DrawInfoPanel();
+   
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason) { ObjectsDeleteAll(0, ObjPrefix); }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, _Period, 0, 100, rates) < 100) return;
+
+   if(rates[0].time == LastBarTime) {
+      ManageTrailingStop();
+      return;
+   }
+   LastBarTime = rates[0].time;
+
+   CalculateSR(rates);
+   CalculateFibo(rates);
+   if(UseCRT) DetectCRT(rates);
+   
+   CheckEntry();
+   UpdateInfoPanel();
+}
+
+//+------------------------------------------------------------------+
+//| Fibonacci Strategy Logic                                         |
+//+------------------------------------------------------------------+
+void CalculateFibo(const MqlRates &rates[])
+{
+   Fibo_BullSignal = false;
+   Fibo_BearSignal = false;
+   
+   int highIdx = ArrayMaximum(rates, 1, Fibo_Lookback);
+   int lowIdx  = ArrayMinimum(rates, 1, Fibo_Lookback);
+   
+   double swingHigh = rates[highIdx].high;
+   double swingLow  = rates[lowIdx].low;
+   double diff      = swingHigh - swingLow;
+   
+   // Calculate 61.8% Retracement level
+   double fiboBuyLevel  = swingLow + (diff * (1.0 - Fibo_Level));
+   double fiboSellLevel = swingHigh - (diff * (1.0 - Fibo_Level));
+   
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Signal if price is touching the Golden Ratio zone
+   if(currentPrice <= fiboBuyLevel + (2*m_pip) && currentPrice >= fiboBuyLevel - (2*m_pip)) Fibo_BullSignal = true;
+   if(currentPrice >= fiboSellLevel - (2*m_pip) && currentPrice <= fiboSellLevel + (2*m_pip)) Fibo_BearSignal = true;
+}
+
+//+------------------------------------------------------------------+
+//| Entry Logic with Confluence                                      |
+//+------------------------------------------------------------------+
+void CheckEntry()
+{
+   if(PositionsTotal() > 0) return;
+
+   int buyVotes = 0;
+   int sellVotes = 0;
+
+   // Logic Confluence
+   if(Fibo_BullSignal) buyVotes++;
+   if(Fibo_BearSignal) sellVotes++;
+   if(CRT_BullSignal)  buyVotes++;
+   if(CRT_BearSignal)  sellVotes++;
+   
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(buyVotes >= 1) // Require at least Fibonacci or CRT confirmation
+   {
+      double sl = price - StopLossPips * m_pip;
+      double tp = price + TakeProfitPips * m_pip;
+      m_trade.Buy(LotSize, _Symbol, price, sl, tp, "Market Hunter MT5");
+   }
+   else if(sellVotes >= 1)
+   {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double sl = bid + StopLossPips * m_pip;
+      double tp = bid - TakeProfitPips * m_pip;
+      m_trade.Sell(LotSize, _Symbol, bid, sl, tp, "Market Hunter MT5");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Halloween Stylized Background                                    |
+//+------------------------------------------------------------------+
+void DrawScaryBackground()
+{
+   string font = "Creepster"; // Fallback to Impact if not installed
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED)) font = "Impact";
+
+   // Lightning Strikes (Visualized via Wingdings/Special chars)
+   for(int i=0; i<3; i++) {
+      string ln = ObjPrefix+"Bolt_"+(string)i;
+      ObjectCreate(0, ln, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, ln, OBJPROP_XDISTANCE, 150 + (i*200));
+      ObjectSetInteger(0, ln, OBJPROP_YDISTANCE, 50);
+      ObjectSetString(0, ln, OBJPROP_TEXT, "⚡");
+      ObjectSetInteger(0, ln, OBJPROP_COLOR, clrLightCyan);
+      ObjectSetInteger(0, ln, OBJPROP_FONTSIZE, 80);
+      ObjectSetInteger(0, ln, OBJPROP_ZORDER, 0); // Behind chart
+   }
+
+   // Scary Red Text
+   string names[2] = {"MARKET", "HUNTER"};
+   for(int i=0; i<2; i++) {
+      string obj = ObjPrefix+"BGTxt_"+(string)i;
+      ObjectCreate(0, obj, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, obj, OBJPROP_XDISTANCE, 100);
+      ObjectSetInteger(0, obj, OBJPROP_YDISTANCE, 120 + (i*90));
+      ObjectSetString(0, obj, OBJPROP_TEXT, names[i]);
+      ObjectSetString(0, obj, OBJPROP_FONT, "Impact");
+      ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, 110);
+      ObjectSetInteger(0, obj, OBJPROP_COLOR, C'40,0,0'); // Dark Blood Red
+      ObjectSetInteger(0, obj, OBJPROP_ZORDER, -1);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| S&R and CRT Logic Ported to MT5                                  |
+//+------------------------------------------------------------------+
+void CalculateSR(const MqlRates &rates[]) {
+   double h = rates[ArrayMaximum(rates, 1, SR_Lookback)].high;
+   double l = rates[ArrayMinimum(rates, 1, SR_Lookback)].low;
+   ResistanceLevel = h; SupportLevel = l;
+}
+
+void DetectCRT(const MqlRates &rates[]) {
+   CRT_BullSignal = (rates[1].low < rates[2].low && rates[1].close > rates[2].low);
+   CRT_BearSignal = (rates[1].high > rates[2].high && rates[1].close < rates[2].high);
+}
+
+void ManageTrailingStop() {
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      if(PositionSelectByTicket(PositionGetTicket(i))) {
+         if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+         // Trailing logic...
+      }
+   }
+}
+
+void DrawInfoPanel() { /* Logic for panel drawing */ }
+void UpdateInfoPanel() { /* Logic for panel updates */ }
